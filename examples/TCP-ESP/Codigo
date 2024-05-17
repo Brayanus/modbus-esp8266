@@ -1,0 +1,118 @@
+#include <WiFi.h>            // Biblioteca para la conexión WiFi
+#include <PubSubClient.h>    // Biblioteca para la comunicación MQTT
+#include <ArduinoJson.h>     // Biblioteca para manipular JSON
+#include <PZEM004Tv30.h>     // Biblioteca para interactuar con el sensor PZEM004Tv30
+
+// Definición del pin del relé
+#define PIN_RELE 25
+
+// Inicialización del objeto PZEM004Tv30 con el puerto Serial2 y los pines 16 (RX) y 17 (TX)
+PZEM004Tv30 pzem(Serial2, 16, 17);
+
+// Credenciales WiFi
+const char *ssid = "BrayanAP";        // Nombre de la red WiFi
+const char *password = "brayanwifi";  // Contraseña de la red WiFi
+
+// Configuración del broker MQTT
+const char *mqtt_broker = "broker.emqx.io";    // Dirección del broker MQTT
+const char *mqtt_topic = "emqx/esp32";         // Topic para publicar mensajes
+const char *mqtt_username = "emqx";            // Nombre de usuario para el broker MQTT
+const char *mqtt_password = "public";          // Contraseña para el broker MQTT
+const int mqtt_port = 1883;                    // Puerto del broker MQTT
+
+// Inicialización de clientes WiFi y MQTT
+WiFiClient espClient;
+PubSubClient mqtt_client(espClient);
+
+// Variables para manejar JSON
+String jsonserial = "";
+JsonDocument myjson;
+
+void setup() {
+    Serial.begin(115200);        // Inicialización del puerto serial para debug
+    connectToWiFi();             // Conexión a la red WiFi
+    mqtt_client.setServer(mqtt_broker, mqtt_port);  // Configuración del servidor MQTT
+    mqtt_client.setKeepAlive(60);                   // Configuración del KeepAlive
+    mqtt_client.setCallback(mqttCallback);          // Definición de la función callback para MQTT
+    connectToMQTT();                                // Conexión al broker MQTT
+    pinMode(PIN_RELE, OUTPUT);                      // Configuración del pin del relé como salida
+}
+
+void loop() 
+{
+    if (!mqtt_client.connected()) {
+        connectToMQTT();         // Reconexión al broker MQTT si la conexión se pierde
+    }
+    mqtt_client.loop();          // Mantener la conexión MQTT activa
+
+    // Solicitar los valores al sensor PZEM004Tv30
+    float voltage = pzem.voltage();          // Medición de voltaje
+    float current = pzem.current();          // Medición de corriente
+    float activePower = pzem.power();        // Medición de potencia activa
+    float powerFactor = pzem.pf();           // Medición del factor de potencia
+    float energy = pzem.energy();            // Medición de energía consumida
+    float frequency = pzem.frequency();      // Medición de la frecuencia
+
+    // Calcular la potencia aparente y la potencia reactiva
+    float X = acos(powerFactor);             // Calcular el ángulo de fase
+    float apparentPower = abs(current) * abs(voltage); // Calcular la potencia aparente
+    float Pot_real = apparentPower * powerFactor;      // Calcular la potencia real
+    float reactivePower = apparentPower * sin(X);      // Calcular la potencia reactiva
+
+    // Crear un objeto JSON con las métricas medidas
+    myjson["Voltaje"] = voltage;
+    myjson["Corriente"] = current;
+    myjson["P_Act"] = activePower;
+    myjson["P_Ap"] = apparentPower;
+    myjson["PF"] = powerFactor;
+    myjson["P_React"] = reactivePower;
+    myjson["Freq"] = frequency;
+    myjson["Energy"] = energy;
+
+    // Serializar el objeto JSON a un string
+    serializeJson(myjson, jsonserial);
+    char json_serial[jsonserial.length() + 1];
+    jsonserial.toCharArray(json_serial, jsonserial.length() + 1);
+
+    // Publicar las métricas en el topic MQTT
+    mqtt_client.publish(mqtt_topic, json_serial);
+
+    delay(3000);  // Esperar
+}
+
+void connectToWiFi() {
+    WiFi.begin(ssid, password);    // Iniciar la conexión WiFi
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");         // Imprimir puntos mientras se conecta
+    }
+    Serial.println("\nConnected to WiFi");  // Confirmar la conexión
+}
+
+void connectToMQTT() {
+    while (!mqtt_client.connected()) {
+        String client_id = "esp32-client-" + String(WiFi.macAddress());  // Crear un ID único para el cliente
+        Serial.printf("Connecting to MQTT Broker as %s.....\n", client_id.c_str());
+        if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
+            Serial.println("Connected to MQTT broker");
+            mqtt_client.subscribe(mqtt_topic);              // Suscribirse al topic
+            mqtt_client.publish(mqtt_topic, "Hi EMQX I'm ESP32 ^^");  // Publicar un mensaje al conectar
+        } else {
+            Serial.print("Failed, rc=");
+            Serial.print(mqtt_client.state());           // Imprimir el estado de la conexión fallida
+            Serial.println(" try again in 5 seconds");
+            delay(5000);                                // Esperar 5 segundos antes de reintentar
+        }
+    }
+}
+
+void mqttCallback(char *mqtt_topic, byte *payload, unsigned int length) {
+    Serial.print("Message received on mqtt_topic: ");
+    Serial.println(mqtt_topic);                        // Imprimir el topic del mensaje recibido
+    Serial.print("Message: ");
+    for (unsigned int i = 0; i < length; i++) {
+        Serial.print((char) payload[i]);              // Imprimir el contenido del mensaje
+    }
+    Serial.println("\n-----------------------");
+}
